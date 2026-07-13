@@ -1,0 +1,11 @@
+
+beautifulsoup4==4.15.0
+click==8.4.2
+EbookLib==0.20
+lxml==6.1.1
+pdfplumber==0.11.10
+spacy==3.8.14
+spacy-legacy==3.0.12
+spacy-loggers==1.0.5
+typer==0.26.8
+
