@@ -120,25 +120,54 @@ def process_new_documents(nlp) -> int:
     return processed
 
 
+def ing_root_candidates(lemma_lower: str):
+    """Candidate verb roots for a NOUN lemma ending in '-ing' (gerund).
+
+    English gerund formation reverses one of: doubled final consonant
+    (running -> run), silent-e drop (writing -> write), or plain suffixing
+    (talking -> talk). We generate all plausible roots; the caller only
+    accepts one if it is independently attested as a VERB lemma elsewhere
+    in the corpus, so unrelated nouns like "morning" or "ceiling" (whose
+    stripped roots are not real verbs) are left untouched.
+    """
+    base = lemma_lower[:-3]
+    candidates = [base, base + "e"]
+    if len(base) >= 3 and base[-1] == base[-2] and base[-1] not in "aeiou":
+        candidates.append(base[:-1])
+    return candidates
+
+
+def normalize_for_wordlist(lemma: str, pos: str, verb_lemma_set: set) -> str:
+    norm = lemma.lower()
+    if pos == "NOUN" and norm.endswith("ing") and len(norm) > 6:
+        for candidate in ing_root_candidates(norm):
+            if candidate in verb_lemma_set:
+                return candidate
+    return norm
+
+
 def aggregate_outputs():
     doc_files = sorted(PER_DOC_DIR.glob("*.csv"))
     if not doc_files:
         print("No per-document stats found yet; nothing to aggregate.")
         return
 
+    per_doc_rows = []
+    for doc_file in doc_files:
+        with doc_file.open(newline="", encoding="utf-8") as f:
+            per_doc_rows.append(list(csv.DictReader(f)))
+
     total_counts = Counter()
     doc_frequency = Counter()
     flags = {}  # (lemma, pos) -> (is_stopword, is_proper_noun)
 
-    for doc_file in doc_files:
-        with doc_file.open(newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                key = (row["lemma"], row["pos"])
-                count = int(row["count"])
-                total_counts[key] += count
-                doc_frequency[key] += 1
-                flags[key] = (int(row["is_stopword"]), int(row["is_proper_noun"]))
+    for rows in per_doc_rows:
+        for row in rows:
+            key = (row["lemma"], row["pos"])
+            count = int(row["count"])
+            total_counts[key] += count
+            doc_frequency[key] += 1
+            flags[key] = (int(row["is_stopword"]), int(row["is_proper_noun"]))
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with OVERALL_STATS_PATH.open("w", newline="", encoding="utf-8") as f:
@@ -149,17 +178,36 @@ def aggregate_outputs():
             is_stop, is_propn = flags[key]
             writer.writerow([rank, lemma, pos, count, doc_frequency[key], is_stop, is_propn])
 
+    # Build the vocabulary wordlist: merge case + POS variants of the same
+    # word (e.g. walk/NOUN + walk/VERB, or talking/NOUN -> talk once it is
+    # confirmed as a gerund of the attested verb "talk") into a single row,
+    # since a language learner only needs one entry per word family.
+    verb_lemma_set = {lemma for (lemma, pos) in total_counts if pos == "VERB"}
+
+    merged_total = Counter()
+    merged_doc_freq = Counter()
+    merged_pos_variants = {}
+
+    for rows in per_doc_rows:
+        doc_lemmas_seen = set()
+        for row in rows:
+            if int(row["is_stopword"]) or int(row["is_proper_noun"]):
+                continue
+            pos = row["pos"]
+            norm = normalize_for_wordlist(row["lemma"], pos, verb_lemma_set)
+            count = int(row["count"])
+            merged_total[norm] += count
+            merged_pos_variants.setdefault(norm, set()).add(pos)
+            doc_lemmas_seen.add(norm)
+        for norm in doc_lemmas_seen:
+            merged_doc_freq[norm] += 1
+
     with WORDLIST_PATH.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["rank", "lemma", "pos", "total_count", "doc_frequency"])
-        rank = 0
-        for key, count in total_counts.most_common():
-            is_stop, is_propn = flags[key]
-            if is_stop or is_propn:
-                continue
-            rank += 1
-            lemma, pos = key
-            writer.writerow([rank, lemma, pos, count, doc_frequency[key]])
+        writer.writerow(["rank", "lemma", "pos_variants", "total_count", "doc_frequency"])
+        for rank, (lemma, count) in enumerate(merged_total.most_common(), start=1):
+            pos_variants = ";".join(sorted(merged_pos_variants[lemma]))
+            writer.writerow([rank, lemma, pos_variants, count, merged_doc_freq[lemma]])
 
     print(f"Aggregated {len(doc_files)} document(s) -> {OVERALL_STATS_PATH.relative_to(ROOT)}, {WORDLIST_PATH.relative_to(ROOT)}")
 

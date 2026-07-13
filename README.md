@@ -28,11 +28,42 @@ python -m venv .venv
 ## Outputs
 - `output/per_document/<book>.csv` — per-document word counts
   (`lemma, pos, count, is_stopword, is_proper_noun`).
-- `output/overall_stats.csv` — full corpus-wide statistics (all words,
-  including stopwords/proper nouns, tagged for filtering).
-- `output/wordlist_overall.csv` — stopwords and proper nouns removed; the
-  base word list, ranked by frequency, ready to use for building vocabulary
-  lists in other languages.
+- `output/overall_stats.csv` — full corpus-wide statistics, one row per
+  `(lemma, pos)` pair exactly as spaCy tagged it (all words, including
+  stopwords/proper nouns, tagged for filtering). Useful for auditing/
+  debugging, since it shows every POS variant a word was seen as.
+- `output/wordlist_overall.csv` — the base word list for building vocabulary
+  lists in other languages: stopwords and proper nouns removed, and
+  **merged across POS/case so each word family is a single row**
+  (`lemma, pos_variants, total_count, doc_frequency`), ranked by frequency.
+
+### Why merging is needed (and its limits)
+spaCy lemmatizes per-token based on its own POS guess, so the same word can
+end up on two different rows in `overall_stats.csv` — e.g. `walk` tagged
+`NOUN` in "a long walk" vs `VERB` in "they walk". Gerunds are worse: a
+gerund used nominally (e.g. "The **talking** stopped.") is correctly tagged
+`NOUN` by spaCy, and NOUN lemmatization only handles plurals, not "-ing"
+stripping, so `talking` stays `talking` instead of collapsing to `talk`.
+`wordlist_overall.csv` fixes this by:
+1. Merging rows for the same lemma across all POS tags (case-insensitive).
+2. For any `NOUN` lemma ending in `-ing`, checking whether stripping the
+   gerund suffix (handling doubled consonants like `running`→`run` and
+   silent-e like `writing`→`write`) yields a verb root that is
+   independently attested as a `VERB` lemma elsewhere in the corpus — if so,
+   it merges into that verb (`talking`→`talk`, `understanding`→`understand`).
+   This avoids misfiring on genuine standalone nouns like `morning` or
+   `ceiling`, whose stripped roots (`morn`, `ceil`) aren't real verbs.
+
+**Known remaining limitations** (left as-is, no general fix without a
+hand-curated dictionary):
+- Rare cases where spaCy's own lemmatizer fails to reduce an inflected form
+  (e.g. an isolated `worlds` that doesn't collapse to `world`) stay
+  ungrouped — typically a handful of occurrences, negligible for ranking.
+- Nouns that are spelled identically to an unrelated verb's irregular past
+  tense (e.g. `thought` the noun vs. `think`→`thought`→`think`) are **not**
+  merged, since there's no general rule to tell "inflected form of an
+  irregular verb" apart from "genuinely distinct noun" without a curated
+  irregular-verb lookup table.
 
 ## Architecture
 
